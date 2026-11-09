@@ -205,7 +205,9 @@ std::map<std::pair<std::uint32_t, std::uint32_t>, BackedSurface>& lastBacked() {
 }
 
 void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result) {
-    zero(cx, 0x000, 0x00001f9fu, "depth/stencil clear, copy, resummarize or decompress draws (DB_RENDER_CONTROL)");
+    // STENCIL_CLEAR_ENABLE (bit 1) is left set on the full-screen pass that writes the display buffer.
+    // Refusing it dropped that pass and left the screen black, so only the other operations are refused.
+    zero(cx, 0x000, 0x00001f9du, "depth clear, copy, resummarize or decompress draws (DB_RENDER_CONTROL)");
     const auto view = read(cx, 0x002);
     zero(cx, 0x002, 0x3c000000u, "depth mips (DB_DEPTH_VIEW MIP_LEVEL)");
     zero(cx, 0x010, 0x000f100cu, "multisampled, partially resident or mipmapped depth (DB_Z_INFO)");

@@ -193,10 +193,10 @@ void emitEntryPrologue(IrProgram& program, IrBlock& entryBlock, const TranslateO
         entryIr.SetScalarMaskTag(reg, entryIr.ConstantBool(false));
     }
 
+    // Pixel shaders start with every lane enabled. Starting them from gl_HelperInvocation made the
+    // full-screen display pass discard all of its pixels on Steam Deck (RADV), leaving a black screen.
+    // Helper invocations write nothing to the framebuffer, so they do not need to be masked here.
     IrValue* initialExec = &entryIr.ConstantBool(true);
-    if (options.stage == ShaderStageKind::Pixel) {
-        initialExec = &entryIr.IEqual(builtin(StageInputKind::HelperInvocation), entryIr.Constant(0u));
-    }
     std::uint32_t totalThreads = 0;
     const auto* workgroup = shaderWorkgroupInput(options.stage, options.inputInfo);
     if (workgroup != nullptr) {

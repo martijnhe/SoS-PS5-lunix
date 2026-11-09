@@ -83,6 +83,12 @@ struct GnuHashLayout {
 
 constexpr std::int64_t kDtNeeded = 1;
 constexpr std::int64_t kDtSoname = 14;
+constexpr std::int64_t kDtRpath = 15;
+constexpr std::int64_t kDtRunpath = 29;
+// Dynamic entries whose value is a .dynstr offset that must survive the string table rebuild.
+constexpr bool IsDynamicNameTag(std::int64_t tag) {
+    return tag == kDtNeeded || tag == kDtSoname || tag == kDtRpath || tag == kDtRunpath;
+}
 constexpr std::int64_t kDtNull = 0;
 constexpr std::uint32_t kShtDynamic = 6u;
 constexpr std::uint32_t kShtGnuVerneed = 0x6ffffffeu;

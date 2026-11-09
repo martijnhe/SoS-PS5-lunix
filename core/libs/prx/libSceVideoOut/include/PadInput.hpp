@@ -21,6 +21,10 @@ struct ScriptedPress {
 
 class PadInput {
 public:
+    /// L3+R3 held for a moment, once per press (opens or closes the in-game menu).
+    bool ConsumeMenuCombo();
+    /// The physical buttons for the in-game menu, before any remapping; the left stick counts as the D-pad.
+    std::uint32_t MenuButtons() const;
     PadInput();
     ~PadInput();
     void HandleEvent(const SDL_Event& event, DisplayWindow& window);
@@ -43,6 +47,8 @@ private:
     std::chrono::steady_clock::time_point scriptStart{};
     std::vector<std::chrono::steady_clock::time_point> scriptReleases;
     std::uint32_t scriptButtons = 0;
+    bool comboHeld = false, comboLatched = false, comboPressed = false;
+    std::chrono::steady_clock::time_point comboSince{};
     bool scriptActive = false;
     bool scriptStick = false;
     std::array<std::uint8_t, 2> scriptStickAxes{128, 128};

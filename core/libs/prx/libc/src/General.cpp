@@ -144,13 +144,21 @@ extern "C" int APS5_VABI chdir_nid_postfix(const char* path) {
         auto& state = Directories();
         std::lock_guard lock(state.mutex);
         std::error_code error;
-        const auto resolved = std::filesystem::canonical(Resolve(state, path), error);
+        const auto requested = Resolve(state, path);
+        auto resolved = std::filesystem::canonical(requested, error);
         if (error) { errno = DirectoryFailure(error); return -1; }
         if (!std::filesystem::is_directory(resolved, error)) {
             errno = error ? DirectoryFailure(error) : 20; return -1;
         }
-        const auto relative = resolved.lexically_relative(state.root);
-        if (relative.empty() || *relative.begin() == "..") { errno = 45; return -1; }
+        auto relative = resolved.lexically_relative(state.root);
+        if (relative.empty() || *relative.begin() == "..") {
+            // app0/Media and app0/sce_sys may be links to a game folder elsewhere (the Linux launcher's
+            // game folder setting). Such a directory is still inside the guest's root by its own path.
+            resolved = requested.lexically_normal();
+            if (!resolved.has_filename()) resolved = resolved.parent_path();
+            relative = resolved.lexically_relative(state.root);
+            if (relative.empty() || *relative.begin() == "..") { errno = 45; return -1; }
+        }
         state.current = resolved;
         return 0;
     } catch (const std::bad_alloc&) { errno = 12; return -1; }

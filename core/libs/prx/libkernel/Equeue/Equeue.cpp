@@ -2,7 +2,7 @@
 #include "prx/common/StderrLog.hpp"
 #include <cstdio>
 #include <atomic>
-extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId();
+#include "prx/libkernel/Pthread/include/WakeEvent.hpp"
 #include "Equeue.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 
@@ -312,7 +312,7 @@ int APS5_VABI sceKernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, int
     }
     if (std::getenv("APS5_TRACE_SYNC")) {
         static std::atomic<int> entered{0};
-        if (entered.fetch_add(1) < 60) aps5::LogErr( "[eq] enter wait tid=%lu eq=%llx num=%d timo=%d\n", static_cast<unsigned long>(GetCurrentThreadId()), static_cast<long long>(eq), num, timo ? static_cast<int>(*timo) : -1);
+        if (entered.fetch_add(1) < 60) aps5::LogErr( "[eq] enter wait tid=%lu eq=%llx num=%d timo=%d\n", aps5::CurrentThreadIdForLog(), static_cast<long long>(eq), num, timo ? static_cast<int>(*timo) : -1);
     }
     const auto waitStart = std::chrono::steady_clock::now();
     char parkTarget[80];
@@ -333,7 +333,7 @@ int APS5_VABI sceKernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, int
     if (std::getenv("APS5_TRACE_SYNC")) {
         static std::atomic<int> printed{0};
         if (printed.fetch_add(1) < 80) {
-            aps5::LogErr( "[eq] wait eq=%llx tid=%lu -> %d", static_cast<long long>(eq), static_cast<unsigned long>(GetCurrentThreadId()), *out);
+            aps5::LogErr( "[eq] wait eq=%llx tid=%lu -> %d", static_cast<long long>(eq), aps5::CurrentThreadIdForLog(), *out);
             for (int i = 0; i < *out && i < num; ++i) aps5::LogErr( " {ident=%llx filter=%d flags=%x fflags=%x data=%llx udata=%p}", static_cast<unsigned long long>(ev[i].ident), static_cast<int>(ev[i].filter), static_cast<unsigned>(ev[i].flags), static_cast<unsigned>(ev[i].fflags), static_cast<unsigned long long>(ev[i].data), ev[i].udata);
             aps5::LogErr( "\n");
         }

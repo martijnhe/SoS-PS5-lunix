@@ -158,7 +158,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
             std::vector<std::string> needed;
             for (const auto dependency : dependencies[index]) needed.push_back("$ORIGIN/" + images[dependency].OutputName);
             needed.insert(needed.end(), hostLibraries.begin(), hostLibraries.end());
-            output = Elfpatcher::GuestModuleWriter().WriteLinux(image, needed, guestRunPath);
+            output = Elfpatcher::GuestModuleWriter().WriteLinux(image, needed, guestRunPath, runtime.DeferInit);
         }
         dynamic.GuestModules.push_back(std::move(runtime));
         artifacts.push_back({target, std::move(output)});

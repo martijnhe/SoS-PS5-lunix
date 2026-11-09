@@ -34,6 +34,17 @@ function(configure_windows_unwind target)
     endif()
 endfunction()
 
+# The libraries load each other from the folder they are in (libs/ next to the game program).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(CMAKE_BUILD_RPATH "\$ORIGIN")
+    set(CMAKE_SKIP_BUILD_RPATH OFF)
+    set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
+    # Bind each library's references to its own symbols inside the library, as a Windows DLL does. Without it
+    # the loader binds them to the first definition in load order, and the game's modules load first: the host
+    # libc's _Stdout object was then constructed inside the game libc's own _Stdout, which crashed the first printf.
+    add_link_options(LINKER:-Bsymbolic)
+endif()
+
 set(LIBC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/prx/libc)
 add_library(libc SHARED EXCLUDE_FROM_ALL)
 set(LIBS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR})

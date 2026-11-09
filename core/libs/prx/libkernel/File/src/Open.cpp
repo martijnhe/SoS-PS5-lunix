@@ -130,6 +130,12 @@ int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
         }
         flags = 0;
     }
+#else
+    // Guest paths resolve under the program folder; the random devices are the host's own.
+    if (!std::strcmp(path, "/dev/urandom") || !std::strcmp(path, "/dev/random")) {
+        native = "/dev/urandom";
+        flags = 0;
+    }
 #endif
     int fd = NativeOpen(native, MapFlags(flags), mode);
 #ifdef _WIN32

@@ -6,7 +6,7 @@
 
 namespace Elfpatcher {
 
-std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestImage& image, const std::vector<std::string>& dependencies, const std::string& runPath) const {
+std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestImage& image, const std::vector<std::string>& dependencies, const std::string& runPath, const bool deferInit) const {
     auto bytes = image.Bytes;
     std::vector<Domain::ProgramHeader> headers;
     std::uint64_t end = 0;
@@ -96,8 +96,12 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
         tag(20, 7);
         tag(3, image.Got);
     }
-    if (init != 0) tag(12, init);
-    if (fini != 0) tag(13, fini);
+    if (deferInit) {
+        if (init != 0) tag(DeferredInitTag, init);
+    } else {
+        if (init != 0) tag(12, init);
+        if (fini != 0) tag(13, fini);
+    }
     tag(30, 8);
     tag(0, 0);
     const auto dynamicSize = bytes.size() - dynamicOffset;

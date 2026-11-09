@@ -1,6 +1,7 @@
 #ifndef CORE_LIBS_PRX_LIBSCEVIDEOOUT_INCLUDE_IMGUIOVERLAY_HPP
 #define CORE_LIBS_PRX_LIBSCEVIDEOOUT_INCLUDE_IMGUIOVERLAY_HPP
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 #include "SDL.h"
@@ -14,6 +15,8 @@ public:
 
     void Bind(SDL_Window* target);
     bool ToggleKeyPressed(const SDL_Event& event);
+    void ToggleMenu();
+    void SetPadButtons(std::uint32_t buttons) { padButtons.store(buttons, std::memory_order_relaxed); }
     void ProcessEvent(const SDL_Event& event);
     bool IsOpen() const { return open && state != State::Failed; }
     void SetFramesPerSecond(double fps) { framesPerSecond = fps; }
@@ -59,6 +62,9 @@ private:
     bool sdlStarted = false;
     bool vulkanStarted = false;
     double framesPerSecond = 0.0;
+    std::atomic<std::uint32_t> padButtons{0};
+    std::uint32_t padButtonsSeen = 0;
+    bool focusFirst = false;
     PFN_vkGetInstanceProcAddr instanceProc = nullptr;
     PFN_vkGetDeviceProcAddr deviceProc = nullptr;
     VkInstance instance = VK_NULL_HANDLE;

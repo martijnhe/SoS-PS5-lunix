@@ -6,6 +6,8 @@ Made possible by the [AnyPS5](https://github.com/boykopovar/AnyPS5) project. The
 
 ![God of War: Sons of Sparta running on Windows at 60 FPS](screenshot.jpg)
 
+**Linux:** a native Linux build is available too. See [docs/user/LINUX.md](docs/user/LINUX.md). Status: playable from the logo into the first boss fight at about 47-60 FPS (scripted input so far); details in [LINUX-PORT-PROGRESS.md](LINUX-PORT-PROGRESS.md). Linux and Steam Deck AppImages are on the Releases page for every commit (bring your own game).
+
 ## How to play
 1. Download `SonsOfSparta-PS5-Native-0.4.1-win64.zip` and extract it anywhere.
 2. Copy **your own** decrypted game files into the same folder as `SonsOfSparta-PS5.exe`:

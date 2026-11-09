@@ -4,10 +4,135 @@
 #include <elfpatcher/general/SectionHeaderTableRequest.hpp>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
 #include <algorithm>
+#include <iterator>
+#include <map>
 #include <limits>
 #include <string>
 
 namespace Elfpatcher::Linux {
+
+namespace {
+
+// Linux executables are placed at this address, as in upstream AnyPS5: the console loads the executable
+// inside the 40-bit address window that a title's own sceLibcMspaceCreate checks, and a position
+// independent executable lands far above it (0x55..., or 0x7f... under ld.so).
+constexpr std::uint64_t kFixedBase = 0x400000;
+
+std::uint64_t Read64(const std::vector<std::uint8_t>& b, std::uint64_t o) {
+    if (o + 8 > b.size()) throw Domain::RelinkerException("Fixed base: read outside the image", o);
+    std::uint64_t v = 0;
+    for (int i = 7; i >= 0; --i) v = (v << 8) | b[o + i];
+    return v;
+}
+std::uint32_t Read32(const std::vector<std::uint8_t>& b, std::uint64_t o) { return static_cast<std::uint32_t>(Read64(b, o) & 0xffffffffu); }
+std::uint16_t Read16(const std::vector<std::uint8_t>& b, std::uint64_t o) {
+    if (o + 2 > b.size()) throw Domain::RelinkerException("Fixed base: read outside the image", o);
+    return static_cast<std::uint16_t>(b[o] | (b[o + 1] << 8));
+}
+void Write64(std::vector<std::uint8_t>& b, std::uint64_t o, std::uint64_t v) {
+    for (int i = 0; i < 8; ++i) b[o + i] = static_cast<std::uint8_t>(v >> (8 * i));
+}
+void Write16(std::vector<std::uint8_t>& b, std::uint64_t o, std::uint16_t v) {
+    b[o] = static_cast<std::uint8_t>(v);
+    b[o + 1] = static_cast<std::uint8_t>(v >> 8);
+}
+
+// Turns the finished position-independent executable into an ET_EXEC whose virtual address 0 is at base:
+// every address the image describes (program headers, entry, dynamic pointers, defined symbols, relocation
+// offsets and RELATIVE targets, section addresses) moves by base. Code refers to itself PC-relative or
+// through those relocations, so the bytes themselves stay as they are.
+void RebaseToFixedAddress(std::vector<std::uint8_t>& elf, const std::uint64_t base) {
+    constexpr std::uint32_t PtLoad = 1, PtDynamic = 2, PtGnuStack = 0x6474e551;
+    const std::uint64_t phOff = Read64(elf, 0x20);
+    const std::uint16_t phEntSize = Read16(elf, 0x36);
+    const std::uint16_t phNum = Read16(elf, 0x38);
+    struct Load { std::uint64_t vaddr, offset, fileSize; };
+    std::vector<Load> loads;
+    std::uint64_t dynOff = 0, dynSize = 0;
+    for (std::uint16_t i = 0; i < phNum; ++i) {
+        const auto h = phOff + std::uint64_t{i} * phEntSize;
+        const auto type = Read32(elf, h);
+        if (type == PtLoad) {
+            const auto align = Read64(elf, h + 0x30);
+            if (align > 1 && base % align != 0) throw Domain::RelinkerException("Fixed base is not a multiple of a PT_LOAD alignment");
+            loads.push_back({Read64(elf, h + 0x10), Read64(elf, h + 0x08), Read64(elf, h + 0x20)});
+        }
+        if (type == PtDynamic) { dynOff = Read64(elf, h + 0x08); dynSize = Read64(elf, h + 0x20); }
+    }
+    const auto offsetOf = [&](std::uint64_t vaddr) {
+        for (const auto& load : loads)
+            if (vaddr >= load.vaddr && vaddr < load.vaddr + load.fileSize) return vaddr - load.vaddr + load.offset;
+        throw Domain::RelinkerException("Fixed base: address is not file-backed", vaddr);
+    };
+
+    // Dynamic section: pointer-valued tags.
+    constexpr std::int64_t PointerTags[] = {3, 4, 5, 6, 7, 12, 13, 17, 23, 25, 26, 32, 36, 0x6ffffef5, 0x6ffffff0, 0x6ffffffc, 0x6ffffffe};
+    std::map<std::int64_t, std::uint64_t> tags;
+    for (std::uint64_t e = dynOff; e + 16 <= dynOff + dynSize; e += 16) {
+        const auto tag = static_cast<std::int64_t>(Read64(elf, e));
+        if (tag == 0) break;
+        const auto value = Read64(elf, e + 8);
+        tags.emplace(tag, value);
+        if (tag == 0x6ffffffb && (value & 0x08000000u)) Write64(elf, e + 8, value & ~std::uint64_t{0x08000000u});  // drop DF_1_PIE
+        if (std::find(std::begin(PointerTags), std::end(PointerTags), tag) != std::end(PointerTags)) Write64(elf, e + 8, value + base);
+    }
+
+    // Defined dynamic symbols. The count comes from the .dynsym section header (offsets in this image's
+    // section table are file offsets), else from the gap up to the string table.
+    if (tags.contains(6)) {
+        const auto symOff = offsetOf(tags[6]);
+        std::uint64_t count = 0;
+        const auto shOff = Read64(elf, 0x28);
+        const auto shNum = Read16(elf, 0x3c), shEntSize = Read16(elf, 0x3a);
+        for (std::uint16_t i = 0; shOff != 0 && i < shNum; ++i) {
+            const auto sh = shOff + std::uint64_t{i} * shEntSize;
+            if (Read32(elf, sh + 4) == 11) { count = Read64(elf, sh + 0x20) / 24; break; }
+        }
+        if (count == 0 && tags.contains(5) && tags[5] > tags[6]) count = (tags[5] - tags[6]) / 24;
+        for (std::uint64_t i = 1; i < count; ++i) {
+            const auto sym = symOff + i * 24;
+            const auto section = Read16(elf, sym + 6);
+            if (section == 0 || section == 0xfff1 || (elf[sym + 4] & 0xf) == 6) continue;  // UNDEF, ABS, TLS
+            Write64(elf, sym + 8, Read64(elf, sym + 8) + base);
+        }
+    }
+
+    // Relocations.
+    const auto rebaseRelocations = [&](std::int64_t tableTag, std::int64_t sizeTag) {
+        if (!tags.contains(tableTag) || !tags.contains(sizeTag)) return;
+        const auto table = offsetOf(tags[tableTag]);
+        for (std::uint64_t e = table; e + 24 <= table + tags[sizeTag]; e += 24) {
+            const auto type = static_cast<std::uint32_t>(Read64(elf, e + 8));
+            if (type == 0) continue;
+            if (type == 8 || type == 37) Write64(elf, e + 16, Read64(elf, e + 16) + base);  // RELATIVE, IRELATIVE
+            else if (type != 1 && type != 2 && type != 6 && type != 7 && type != 10 && type != 16 && type != 17 && type != 18)
+                throw Domain::RelinkerException("Relocation type " + std::to_string(type) + " cannot be placed at a fixed Linux base");
+            Write64(elf, e, Read64(elf, e) + base);
+        }
+    };
+    rebaseRelocations(7, 8);    // DT_RELA, DT_RELASZ
+    rebaseRelocations(23, 2);   // DT_JMPREL, DT_PLTRELSZ
+
+    // Program headers, entry point, type.
+    for (std::uint16_t i = 0; i < phNum; ++i) {
+        const auto h = phOff + std::uint64_t{i} * phEntSize;
+        if (Read32(elf, h) == PtGnuStack) continue;
+        Write64(elf, h + 0x10, Read64(elf, h + 0x10) + base);
+        Write64(elf, h + 0x18, Read64(elf, h + 0x18) + base);
+    }
+    Write64(elf, 0x18, Read64(elf, 0x18) + base);
+    Write16(elf, 0x10, 2);  // ET_EXEC
+
+    // Section addresses, for tools; the loader does not read them.
+    const auto shOff = Read64(elf, 0x28);
+    const auto shNum = Read16(elf, 0x3c), shEntSize = Read16(elf, 0x3a);
+    for (std::uint16_t i = 0; shOff != 0 && i < shNum; ++i) {
+        const auto sh = shOff + std::uint64_t{i} * shEntSize;
+        if (const auto address = Read64(elf, sh + 0x10); address != 0) Write64(elf, sh + 0x10, address + base);
+    }
+}
+
+}
 
 LinuxElfPatcher::LinuxElfPatcher(
     std::shared_ptr<IEntryStubBuilder> entryStubBuilder,
@@ -201,6 +326,8 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
 
     _sectionHeaderTableBuilder->WriteTable(buf, sectionRequest);
 
+    // Lazy binding keeps the executable position independent, as upstream does.
+    if (!lazyBinding) RebaseToFixedAddress(buf, kFixedBase);
     return buf;
 }
 

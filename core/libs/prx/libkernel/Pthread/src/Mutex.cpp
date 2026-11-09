@@ -1,6 +1,7 @@
 #include "../include/Pthread.hpp"
 #include "../include/Mutex.hpp"
 #include "prx/libkernel/Time/include/TimedWait.hpp"
+#include "prx/libkernel/Pthread/include/WakeEvent.hpp"
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
@@ -21,7 +22,7 @@ template <class TMutex>
 void lockInterruptibly(TMutex& native) {
     if (native.try_lock()) return;
     Pthread self = scePthreadSelf();
-    if (!self->wakeEvent) self->wakeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!self->wakeEvent) self->wakeEvent = aps5::WakeEventCreate();
     for (;;) {
         self->inWait.store(true);
         const bool locked = self->pendingException.load() == 0 && native.try_lock_for(std::chrono::milliseconds(2));

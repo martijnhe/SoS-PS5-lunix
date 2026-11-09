@@ -46,6 +46,29 @@ static thread_local bool threadFinishing = false;
 #ifndef _WIN32
 static thread_local std::unique_ptr<PthreadPrivate> adoptedThread;
 
+// Records where a thread's stack really is, as the Windows path does: the title's garbage collector reads it
+// through scePthreadAttrGet/Getstack to scan the thread's stack, and a null address left those stacks
+// unscanned, so objects referenced only from them were freed while still in use.
+static void RecordNativeStack(PthreadPrivate* thread, pthread_t native) {
+    pthread_attr_t attributes;
+    if (pthread_getattr_np(native, &attributes) != 0) return;
+    void* address = nullptr;
+    std::size_t size = 0;
+    if (pthread_attr_getstack(&attributes, &address, &size) == 0 && address != nullptr && size != 0) {
+        // Like Windows: the reported stack ends where the real one does and keeps the requested size
+        // when it fits; an adopted thread (no request) reports its whole stack.
+        const auto top = reinterpret_cast<std::uintptr_t>(address) + size;
+        const std::size_t reported = thread->stackSize != 0 && thread->stackSize <= size ? thread->stackSize : size;
+        thread->stackAddress = reinterpret_cast<void*>(top - reported);
+        thread->stackSize = reported;
+    }
+    pthread_attr_destroy(&attributes);
+}
+
+// std::thread uses glibc's default stack size; a title that asks for a larger stack gets it through the
+// process default, set under this lock for the one creation.
+static std::mutex stackSizeLock;
+
 static thread_local std::jmp_buf* threadExitJump = nullptr;
 #endif
 
@@ -230,9 +253,26 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
         ReleaseThread(published);
 #else
     auto* self = p.get();
+    std::unique_lock stackSizeGuard(stackSizeLock);
+    pthread_attr_t previousDefault;
+    bool restoreDefault = false;
+    if (pthread_getattr_default_np(&previousDefault) == 0) {
+        std::size_t defaultSize = 0;
+        pthread_attr_getstacksize(&previousDefault, &defaultSize);
+        if (p->stackSize > defaultSize) {
+            pthread_attr_t larger;
+            pthread_attr_init(&larger);
+            pthread_attr_setstacksize(&larger, (p->stackSize + 0xffff) & ~std::size_t{0xffff});
+            restoreDefault = pthread_setattr_default_np(&larger) == 0;
+            pthread_attr_destroy(&larger);
+        }
+        if (!restoreDefault) pthread_attr_destroy(&previousDefault);
+    }
     p->_thr = std::thread([self, args = std::move(args), ready = start.get_future()]() mutable {
         if (!ready.get()) return;
         self->threadId = std::this_thread::get_id();
+        self->nativeThread = pthread_self();
+        self->nativeThreadReady.store(true, std::memory_order_release);
         struct ThreadGuard {
             PthreadPrivate* self;
             ~ThreadGuard() {
@@ -247,6 +287,13 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
         }
         threadExitJump = nullptr;
     });
+    if (restoreDefault) {
+        pthread_setattr_default_np(&previousDefault);
+        pthread_attr_destroy(&previousDefault);
+    }
+    stackSizeGuard.unlock();
+    // Before the thread runs or the handle is published, so the stack is never reported as null.
+    RecordNativeStack(self, p->_thr.native_handle());
     try {
         if (detached) p->_thr.detach();
     } catch (...) {
@@ -335,6 +382,9 @@ Pthread APS5_VABI scePthreadSelf() {
         adoptedThread->_detached = true;
         adoptedThread->_adopted = true;
         adoptedThread->threadId = std::this_thread::get_id();
+        adoptedThread->nativeThread = pthread_self();
+        adoptedThread->nativeThreadReady.store(true, std::memory_order_release);
+        RecordNativeStack(adoptedThread.get(), pthread_self());
         currentThread = adoptedThread.get();
     }
 #endif

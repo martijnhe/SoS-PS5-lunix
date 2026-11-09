@@ -14,14 +14,15 @@ std::vector<std::uint8_t> EntryStubBuilder::BuildEntryStub(
     const std::uint64_t stubVaddr,
     const std::uint64_t realEntryVaddr
 ) const {
+    // The guest entry takes the process start block as the kernel lays it out (argc, then the argv pointers,
+    // a null, the environment), which is what the stack pointer points at on entry; upstream AnyPS5 passes it
+    // the same way. The block used to be rebuilt as {argc, pointer to argv}, which the title read as argv[0].
     std::vector<std::uint8_t> s;
-    s.push_back(kStubOpPopRax);
-    _appendBytes(s, kStubOpMovRbxRsp, sizeof(kStubOpMovRbxRsp));
-    _appendBytes(s, kStubOpSubRsp0x30, sizeof(kStubOpSubRsp0x30));
-    _appendBytes(s, kStubOpAndRsp0xf0, sizeof(kStubOpAndRsp0xf0));
-    _appendBytes(s, kStubOpMovDwordPtrRsp, sizeof(kStubOpMovDwordPtrRsp));
-    _appendBytes(s, kStubOpMovQwordPtrRsp8Rbx, sizeof(kStubOpMovQwordPtrRsp8Rbx));
     _appendBytes(s, kStubOpMovRdiRsp, sizeof(kStubOpMovRdiRsp));
+    _appendBytes(s, kStubOpAndRsp0xf0, sizeof(kStubOpAndRsp0xf0));
+    _appendBytes(s, kStubOpPushZero, sizeof(kStubOpPushZero));
+    _appendBytes(s, kStubOpPushZero, sizeof(kStubOpPushZero));
+    _appendBytes(s, kStubOpMovRbpRsp, sizeof(kStubOpMovRbpRsp));
     _appendBytes(s, kStubOpXorRsiRsi, sizeof(kStubOpXorRsiRsi));
     const std::uint64_t callInsnVaddr = stubVaddr + s.size();
     const std::uint64_t callNextVaddr = callInsnVaddr + kStubCallInstructionSize;

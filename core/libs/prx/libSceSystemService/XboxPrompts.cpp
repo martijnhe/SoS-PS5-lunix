@@ -1,10 +1,19 @@
-#ifdef _WIN32
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <link.h>
+#include <strings.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <chrono>
+#include <thread>
+#endif
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libScePad/include/PadControllerChannel.hpp"
 
@@ -26,7 +35,7 @@ constexpr std::size_t kControllerUsed = 0x34;
 enum ControlDevice : std::int32_t { Keyboard, Mouse, Gamepad };
 enum GamepadType : std::int32_t { NONE, XboxOne, XboxSeries, PS4, PS5, Switch };
 
-enum class ButtonIcons : std::uint8_t { Automatic, PlayStation, Xbox };
+enum class ButtonIcons : std::uint8_t { Automatic, PlayStation, Xbox, Switch };
 
 // FNV-1a of the code the offsets and the prologue were read from, so only the analysed game build is patched.
 constexpr std::uint64_t kCodeHash = 0x18a26483313682af;
@@ -82,17 +91,29 @@ ButtonIcons buttonIcons = ButtonIcons::Automatic;
 ButtonIcons ParseButtonIcons(const char* value) {
     if (value != nullptr && std::strcmp(value, "playstation") == 0) return ButtonIcons::PlayStation;
     if (value != nullptr && std::strcmp(value, "xbox") == 0) return ButtonIcons::Xbox;
+    if (value != nullptr && std::strcmp(value, "switch") == 0) return ButtonIcons::Switch;
     return ButtonIcons::Automatic;
 }
 
-bool UsesXboxIcons(ButtonIcons setting, PadControllerKind physical) {
-    return setting == ButtonIcons::Xbox || (setting == ButtonIcons::Automatic && physical == PadControllerKind::Xbox);
+// The controller type whose prompts to show, or NONE for the game's own choice.
+GamepadType PromptType(ButtonIcons setting, PadControllerKind physical) {
+    if (setting == ButtonIcons::Xbox || (setting == ButtonIcons::Automatic && physical == PadControllerKind::Xbox)) return XboxSeries;
+    if (setting == ButtonIcons::Switch || (setting == ButtonIcons::Automatic && physical == PadControllerKind::Nintendo)) return Switch;
+    return NONE;
+}
+
+bool UsesXboxIcons(ButtonIcons setting, PadControllerKind physical) { return PromptType(setting, physical) != NONE; }
+
+// The in-game menu's choice once it is known, else the launcher's.
+ButtonIcons Icons() {
+    const std::uint32_t chosen = PadControllerChannel::IconsOverride();
+    return chosen != 0 ? static_cast<ButtonIcons>(chosen - 1) : buttonIcons;
 }
 
 std::int32_t* Int32(void* object, std::size_t offset) { return reinterpret_cast<std::int32_t*>(static_cast<std::uint8_t*>(object) + offset); }
 
 bool XboxGlyphsActive(void* overseer) {
-    return UsesXboxIcons(buttonIcons, PadControllerChannel::Current()) && *Int32(overseer, kInputDevice) == Gamepad;
+    return UsesXboxIcons(Icons(), PadControllerChannel::Current()) && *Int32(overseer, kInputDevice) == Gamepad;
 }
 
 // The controller type the game had before the override, restored once no Xbox prompts apply.
@@ -103,14 +124,15 @@ std::int32_t gameControllerUsed = 0;
 void APS5_VABI SelectPrompts(void* overseer) {
     const bool override = XboxGlyphsActive(overseer);
     std::int32_t& controllerUsed = *Int32(overseer, kControllerUsed);
+    const GamepadType wanted = PromptType(Icons(), PadControllerChannel::Current());
     if (override) {
-        if (controllerUsed != XboxSeries) {
+        if (controllerUsed != wanted) {
             if (!replaced) gameControllerUsed = controllerUsed;
             replaced = true;
-            controllerUsed = XboxSeries;
+            controllerUsed = wanted;
         }
     } else if (replaced) {
-        if (controllerUsed == XboxSeries) controllerUsed = gameControllerUsed;
+        if (controllerUsed == XboxSeries || controllerUsed == Switch) controllerUsed = gameControllerUsed;
         replaced = false;
     }
 }
@@ -188,7 +210,7 @@ void ShowGlyph(void* prompt, std::size_t label, void* sprite, const void* imageM
 
 // Entered with the PromptTextSwitch in rdi, on the game thread, before the dialog's text is set.
 void APS5_VABI ShowDialogGlyphs(void* prompt) {
-    if (!glyphsOverridden && !UsesXboxIcons(buttonIcons, PadControllerChannel::Current())) return;
+    if (!glyphsOverridden && !UsesXboxIcons(Icons(), PadControllerChannel::Current())) return;
     const void* const overseerMethod = ResolvedSlot(kOverseerSlot);
     const void* const imageMethod = ResolvedSlot(kImageSlot);
     if (!Alive(prompt) || overseerMethod == nullptr || imageMethod == nullptr) return;
@@ -206,8 +228,14 @@ void APS5_VABI ShowDialogGlyphs(void* prompt) {
 // body holds the instructions copied from the method entry, relocated to run from the trampoline.
 bool InstallEntryHook(std::uint32_t methodOffset, std::size_t stolen, const std::uint8_t* body, std::size_t bodySize, const void* handler) {
     const std::size_t size = sizeof(kTrampolineStart) + bodySize + sizeof(kJumpBack) + sizeof(void*);
+#ifdef _WIN32
     auto* trampoline = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     if (trampoline == nullptr) return false;
+#else
+    void* const memory = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (memory == MAP_FAILED) return false;
+    auto* trampoline = static_cast<std::uint8_t*>(memory);
+#endif
     std::uint8_t* const method = game + methodOffset;
     const void* const resume = method + stolen;
     std::memcpy(trampoline, kTrampolineStart, sizeof(kTrampolineStart));
@@ -217,6 +245,21 @@ bool InstallEntryHook(std::uint32_t methodOffset, std::size_t stolen, const std:
     std::memcpy(trampoline + sizeof(kTrampolineStart) + bodySize + sizeof(kJumpBack), &resume, sizeof(resume));
     std::uint8_t jump[kEntryJump] = {0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xe0};
     std::memcpy(jump + 2, &trampoline, sizeof(trampoline));
+#ifndef _WIN32
+    const auto pageSize = static_cast<std::uintptr_t>(sysconf(_SC_PAGESIZE));
+    const auto pageStart = reinterpret_cast<std::uintptr_t>(method) & ~(pageSize - 1);
+    const auto pageBytes = reinterpret_cast<std::uintptr_t>(method) + sizeof(jump) - pageStart;
+    if (mprotect(trampoline, size, PROT_READ | PROT_EXEC) != 0 ||
+        mprotect(reinterpret_cast<void*>(pageStart), pageBytes, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        munmap(trampoline, size);
+        return false;
+    }
+    std::memcpy(method, jump, sizeof(jump));
+    mprotect(reinterpret_cast<void*>(pageStart), pageBytes, PROT_READ | PROT_EXEC);
+    __builtin___clear_cache(reinterpret_cast<char*>(trampoline), reinterpret_cast<char*>(trampoline + size));
+    __builtin___clear_cache(reinterpret_cast<char*>(method), reinterpret_cast<char*>(method + sizeof(jump)));
+    return true;
+#else
     DWORD trampolineProtection = 0, gameProtection = 0;
     if (!VirtualProtect(trampoline, size, PAGE_EXECUTE_READ, &trampolineProtection) ||
         !VirtualProtect(method, sizeof(jump), PAGE_EXECUTE_READWRITE, &gameProtection)) {
@@ -228,6 +271,7 @@ bool InstallEntryHook(std::uint32_t methodOffset, std::size_t stolen, const std:
     FlushInstructionCache(GetCurrentProcess(), trampoline, size);
     FlushInstructionCache(GetCurrentProcess(), method, sizeof(jump));
     return true;
+#endif
 }
 
 bool InstallPromptHook() {
@@ -280,6 +324,36 @@ bool StartDialogHook(std::uint32_t imageSize) {
     return true;
 }
 
+#ifndef _WIN32
+// The module is loaded by the game after this library, so a small thread waits for it.
+int FindGame(dl_phdr_info* info, std::size_t, void* result) {
+    if (info->dlpi_name == nullptr || strcasestr(info->dlpi_name, "Il2cppUserAssemblies") == nullptr) return 0;
+    std::uint64_t end = 0;
+    for (int i = 0; i < info->dlpi_phnum; ++i)
+        if (info->dlpi_phdr[i].p_type == PT_LOAD) end = std::max<std::uint64_t>(end, info->dlpi_phdr[i].p_vaddr + info->dlpi_phdr[i].p_memsz);
+    // The offsets above are from the Windows image, whose sections sit 0x10000 later than in this one.
+    constexpr std::uint32_t kWindowsImageOffset = 0x10000;
+    game = reinterpret_cast<std::uint8_t*>(info->dlpi_addr) - kWindowsImageOffset;
+    *static_cast<std::uint32_t*>(result) = static_cast<std::uint32_t>(end) + kWindowsImageOffset;
+    return 1;
+}
+
+bool StartXboxPrompts() {
+    buttonIcons = ParseButtonIcons(std::getenv("SOS_CONTROLLER_BUTTON_ICONS"));
+    std::thread([] {
+        std::uint32_t imageSize = 0;
+        for (int tries = 0; tries < 60000 && dl_iterate_phdr(FindGame, &imageSize) == 0; ++tries)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (imageSize == 0) {
+            std::fprintf(stderr, "Xbox prompts: the game module never loaded, prompts keep the PlayStation set\n");
+            return;
+        }
+        StartPromptHook(imageSize);
+        StartDialogHook(imageSize);
+    }).detach();
+    return true;
+}
+#else
 bool StartXboxPrompts() {
     buttonIcons = ParseButtonIcons(std::getenv("SOS_CONTROLLER_BUTTON_ICONS"));
     game = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(L"Il2cppUserAssemblies.prx.guest.prx"));
@@ -292,8 +366,8 @@ bool StartXboxPrompts() {
     const bool prompts = StartPromptHook(imageSize);
     return StartDialogHook(imageSize) && prompts;
 }
+#endif
 
 [[maybe_unused]] const bool xboxPromptsStarted = StartXboxPrompts();
 
 }
-#endif

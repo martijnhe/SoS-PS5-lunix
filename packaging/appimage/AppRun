@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Runs the game from a writable folder: the AppImage itself is read-only, and the first start
+# prepares your game there. Your game is never part of this file: put a folder named "game" next
+# to the AppImage, or choose it in the window that opens.
+set -euo pipefail
+here=$(dirname -- "$(readlink -f -- "$0")")
+data=${SOS_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/SonsOfSparta-PS5}
+mkdir -p "$data"
+# A new AppImage replaces the program files; saves, settings and the prepared game stay.
+if ! cmp -s "$here/payload/VERSION" "$data/VERSION" 2>/dev/null; then
+    rm -rf "$data/libs" "$data/tools"
+    cp -rf "$here/payload/." "$data/"
+    chmod +x "$data/SonsOfSparta-PS5" "$data/tools/relinker"
+fi
+if ! grep -qs '^folder=.' "$data/launcher.ini"; then
+    for folder in "$(dirname -- "${APPIMAGE:-$0}")/game" "$data/game"; do
+        if [[ -f $folder/eboot.bin || -f $folder/eboot.elf ]]; then
+            printf '[game]\nfolder=%s\n' "$(readlink -f -- "$folder")" >> "$data/launcher.ini"
+            break
+        fi
+    done
+fi
+if [[ -f $here/STEAMDECK ]]; then export SOS_STEAMDECK=1; fi
+cd "$data"
+exec ./SonsOfSparta-PS5 "$@"

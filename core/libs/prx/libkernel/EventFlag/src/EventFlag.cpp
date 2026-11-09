@@ -1,4 +1,4 @@
-extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId();
+#include "prx/libkernel/Pthread/include/WakeEvent.hpp"
 #include <cstdint>
 #include "prx/common/StderrLog.hpp"
 #include <cstddef>
@@ -98,7 +98,7 @@ int APS5_VABI sceKernelSetEventFlag(KernelEventFlag ef, uint64_t bit_pattern) {
     std::lock_guard lock(ef->_mutex);
     if (ef->_deleted) return SCE_KERNEL_ERROR_ESRCH;
     ef->_pattern |= bit_pattern;
-    if (TraceSync()) aps5::LogErr( "[evf] set tid=%lu %p '%s' |=0x%llx -> 0x%llx\n", static_cast<unsigned long>(GetCurrentThreadId()), static_cast<void*>(ef), ef->_name.c_str(), static_cast<unsigned long long>(bit_pattern), static_cast<unsigned long long>(ef->_pattern));
+    if (TraceSync()) aps5::LogErr( "[evf] set tid=%lu %p '%s' |=0x%llx -> 0x%llx\n", aps5::CurrentThreadIdForLog(), static_cast<void*>(ef), ef->_name.c_str(), static_cast<unsigned long long>(bit_pattern), static_cast<unsigned long long>(ef->_pattern));
     ef->_changed.NotifyAll();
     return SCE_OK;
 }
@@ -143,7 +143,7 @@ int APS5_VABI sceKernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, u
     if (ef->_deleted) return SCE_KERNEL_ERROR_ESRCH;
     if (!ef->_multipleWaiters && ef->_waiters != 0) return SCE_KERNEL_ERROR_EPERM;
     const uint64_t generation = ef->_cancelGeneration;
-    if (TraceSync()) aps5::LogErr( "[evf] wait tid=%lu %p '%s' want=0x%llx mode=0x%x have=0x%llx timeout=%d caller=%p outer=%p\n", static_cast<unsigned long>(GetCurrentThreadId()), static_cast<void*>(ef), ef->_name.c_str(), static_cast<unsigned long long>(bit_pattern), wait_mode, static_cast<unsigned long long>(ef->_pattern), timeout ? static_cast<int>(*timeout) : -1, __builtin_return_address(0), static_cast<void**>(static_cast<void**>(__builtin_frame_address(0))[0])[1]);
+    if (TraceSync()) aps5::LogErr( "[evf] wait tid=%lu %p '%s' want=0x%llx mode=0x%x have=0x%llx timeout=%d caller=%p outer=%p\n", aps5::CurrentThreadIdForLog(), static_cast<void*>(ef), ef->_name.c_str(), static_cast<unsigned long long>(bit_pattern), wait_mode, static_cast<unsigned long long>(ef->_pattern), timeout ? static_cast<int>(*timeout) : -1, __builtin_return_address(0), static_cast<void**>(static_cast<void**>(__builtin_frame_address(0))[0])[1]);
     const auto released = [&] { return ef->_deleted || ef->_cancelGeneration != generation || IsSatisfied(ef->_pattern, bit_pattern, wait_mode); };
     ++ef->_waiters;
     bool timedOut = false;

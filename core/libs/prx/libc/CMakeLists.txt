@@ -115,6 +115,11 @@ if(BUILD_TESTING)
     endif()
     add_test_executable(guest_standard_stream_tests ${LIBS_INCLUDE_DIR}/tests/GuestStandardStreams.cpp)
     target_include_directories(guest_standard_stream_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Reach libc.prx's stream objects through the GOT, as relinked titles do, instead of copy relocations,
+        # which the library's -Bsymbolic binding does not follow.
+        target_compile_options(guest_standard_stream_tests PRIVATE -fPIC)
+    endif()
     target_link_libraries(guest_standard_stream_tests PRIVATE libc)
     configure_windows_unwind(guest_standard_stream_tests)
     add_test(NAME guest_standard_streams COMMAND guest_standard_stream_tests)

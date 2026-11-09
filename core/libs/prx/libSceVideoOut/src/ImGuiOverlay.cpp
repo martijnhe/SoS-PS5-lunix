@@ -3,6 +3,8 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_vulkan.h"
 #include "prx/libkernel/HostExtension/include/HostExtension.hpp"
+#include "prx/libSceVideoOut/include/QuickSettings.hpp"
+#include "prx/libScePad/include/PadInputTypes.hpp"
 #include <algorithm>
 #include <cfloat>
 #include <cstdio>
@@ -24,7 +26,7 @@ constexpr float kValueWidthEm = 5.0f;
 constexpr float kDimArrowAlpha = 0.35f;
 constexpr float kMarginFontRatio = 0.5f;
 constexpr float kSmallFontRatio = 0.75f;
-constexpr const char* kMenuTitle = "In-Game - F10 Close";
+constexpr const char* kMenuTitle = "In-Game - L3+R3 or F10 Close";
 constexpr std::uint32_t kDescriptorPoolSize = 16;
 // The backend rotates its vertex buffers over this many frames, so it must exceed the presentations allowed in flight.
 constexpr std::uint32_t kVertexBufferRing = 3;
@@ -253,10 +255,15 @@ bool ImGuiOverlay::ToggleKeyPressed(const SDL_Event& event) {
     if (key == SDL_SCANCODE_F9) {
         showFps = !showFps;
     } else {
-        open = !open;
-        if (!open && state == State::Ready) ReleaseImGuiInput();
+        ToggleMenu();
     }
     return true;
+}
+
+void ImGuiOverlay::ToggleMenu() {
+    open = !open;
+    focusFirst = open;
+    if (!open && state == State::Ready) ReleaseImGuiInput();
 }
 
 void ImGuiOverlay::ProcessEvent(const SDL_Event& event) {
@@ -281,6 +288,26 @@ bool ImGuiOverlay::Wanted(const AgcDriver::PresentationOverlayFrame& frame) {
 void ImGuiOverlay::Record(const AgcDriver::PresentationOverlayFrame& frame) {
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplSDL2_NewFrame();
+    if (open) {
+        // The pad drives the menu as the arrow keys, Space and Circle-to-close, so it needs no gamepad mode of its own.
+        ImGuiIO& io = ImGui::GetIO();
+        const std::uint32_t now = padButtons.load(std::memory_order_relaxed);
+        const auto key = [&](Pad::PadButton button, ImGuiKey target) {
+            const auto bit = static_cast<std::uint32_t>(button);
+            if (((now ^ padButtonsSeen) & bit) != 0) io.AddKeyEvent(target, (now & bit) != 0);
+        };
+        key(Pad::PadButton::Up, ImGuiKey_UpArrow);
+        key(Pad::PadButton::Down, ImGuiKey_DownArrow);
+        key(Pad::PadButton::Left, ImGuiKey_LeftArrow);
+        key(Pad::PadButton::Right, ImGuiKey_RightArrow);
+        key(Pad::PadButton::Cross, ImGuiKey_Space);
+        const auto circle = static_cast<std::uint32_t>(Pad::PadButton::Circle);
+        if ((now & circle) != 0 && (padButtonsSeen & circle) == 0) {
+            open = false;
+            ReleaseImGuiInput();
+        }
+        padButtonsSeen = now;
+    }
     ImGui::NewFrame();
     if (open) drawMenu();
     if (showFps) DrawFramesPerSecond(framesPerSecond);
@@ -304,6 +331,46 @@ void ImGuiOverlay::drawMenu() {
     ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0.0f), ImVec2(width, std::max(display.y - 2.0f * margin, 0.0f)));
     if (ImGui::Begin(kMenuTitle, &open,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
+        if (focusFirst) {
+            ImGui::SetKeyboardFocusHere();
+            focusFirst = false;
+        }
+        auto& quick = QuickSettings::Get();
+        bool changed = false;
+        Heading("Display");
+        {
+            static constexpr const char* names[] = {"Off", "30", "40", "45", "60", "90", "120"};
+            int index = 0;
+            for (int i = 0; i < QuickSettings::kFpsChoiceCount; ++i)
+                if (QuickSettings::kFpsChoices[i] == quick.fpsCap.load()) index = i;
+            static const bool fastVblank = std::getenv("APS5_VBLANK_HZ") != nullptr;
+            if (Choice("FPS limit", &index, names, fastVblank ? QuickSettings::kFpsChoiceCount : QuickSettings::kFpsChoicesAtVblank, true, false)) {
+                quick.fpsCap = QuickSettings::kFpsChoices[index];
+                changed = true;
+            }
+        }
+        Separator();
+        Heading("Controls");
+        {
+            static constexpr const char* names[] = {"Auto", "PS", "Xbox", "Switch"};
+            int index = quick.icons.load();
+            if (Choice("Button icons", &index, names, QuickSettings::kIconCount, true, false)) {
+                quick.icons = index;
+                changed = true;
+            }
+        }
+        const auto toggle = [&](const char* label, std::atomic<bool>& setting) {
+            bool value = setting.load();
+            if (Toggle(label, &value, true, HostControlState::Normal)) {
+                setting = value;
+                changed = true;
+            }
+        };
+        toggle("Swap confirm and back", quick.swapConfirm);
+        toggle("Swap bumpers and triggers", quick.swapShoulders);
+        toggle("Invert aiming (up/down)", quick.invertLook);
+        if (changed) QuickSettings::Save();
+        Separator();
         HostMenuDraw_nid_no_patch(kWidgets);
     }
     ImGui::End();

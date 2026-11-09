@@ -9,6 +9,7 @@ enum class PadControllerKind : std::uint8_t {
     PlayStation4,
     Other,
     Xbox,
+    Nintendo,
 };
 
 #endif

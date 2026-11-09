@@ -12,13 +12,30 @@
 #include <atomic>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <dlfcn.h>
 #endif
+#include "prx/libkernel/Pthread/include/WakeEvent.hpp"
 #include <chrono>
 #include <cstring>
 #include <string>
 #include <mutex>
 #include <map>
 namespace {
+
+inline std::uintptr_t MainImageBase() {
+#ifdef _WIN32
+    return reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+#else
+    static const std::uintptr_t base = [] {
+        Dl_info info{};
+        void* self = dlopen(nullptr, RTLD_LAZY | RTLD_NOLOAD);
+        void* entry = self ? dlsym(self, "_start") : nullptr;
+        return entry && dladdr(entry, &info) ? reinterpret_cast<std::uintptr_t>(info.dli_fbase) : std::uintptr_t{0};
+    }();
+    return base;
+#endif
+}
 
 inline void AvpStat(const char* name, int result, bool hasResult) {
     static const bool on = std::getenv("APS5_AVP_STATS") != nullptr;
@@ -32,7 +49,7 @@ inline void AvpStat(const char* name, int result, bool hasResult) {
     if (hasResult) {
         if (std::strcmp(name, "ret-video") == 0) {
             ++requests; pictures += result != 0;
-            auto& entry = byThread[GetCurrentThreadId()];
+            auto& entry = byThread[aps5::CurrentThreadIdForLog()];
             ++entry.first; entry.second += result != 0;
         }
     } else {
@@ -155,7 +172,7 @@ Bool APS5_VABI sceAvPlayerGetVideoDataEx(AvPlayerInternal* h, AvPlayerFrameInfoE
         if (on && shown.load() < 4) {
             const auto caller = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
             static std::atomic<std::uintptr_t> first{0};
-            if (first.exchange(caller) != caller && shown.fetch_add(1) < 4) std::fprintf(stderr, "[avpstat] caller 0x%llx = exe+0x%llx tid=%lu\n", static_cast<unsigned long long>(caller), static_cast<unsigned long long>(caller - reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr))), GetCurrentThreadId());
+            if (first.exchange(caller) != caller && shown.fetch_add(1) < 4) std::fprintf(stderr, "[avpstat] caller 0x%llx = exe+0x%llx tid=%lu\n", static_cast<unsigned long long>(caller), static_cast<unsigned long long>(caller - MainImageBase()), aps5::CurrentThreadIdForLog());
         }
     }
     if (!h || !video_info) return false;

@@ -25,7 +25,11 @@
 #endif
 #include <windows.h>
 #else
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <fstream>
+#include <vector>
 #include <pthread.h>
 #include <sstream>
 #endif
@@ -500,28 +504,64 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
         if (!emit(PageRun{cursor, next, readable, writable})) return true;
         cursor = next;
 #else
-        std::ifstream maps("/proc/self/maps");
-        if (!maps.is_open()) return false;
-        std::string line;
-        bool found = false;
-        while (std::getline(maps, line)) {
-            std::istringstream fields(line);
-            std::uintptr_t first = 0;
-            std::uintptr_t last = 0;
-            char separator = 0;
-            std::string permissions;
-            if (!(fields >> std::hex >> first >> separator >> last >> permissions) || separator != '-' || first >= last || permissions.size() < 2) return false;
-            if (last <= cursor || first > cursor) continue;
-            const auto next = std::min(end, last);
-            if (!emit(PageRun{cursor, next, permissions[0] == 'r', permissions[0] == 'r' && permissions[1] == 'w'})) return true;
-            cursor = next;
-            found = true;
-            break;
+        // /proc/self/maps is far too slow to read per lookup: one parsed snapshot per thread, replaced
+        // when guest allocations change or it is 50 ms old. What is found goes into the page spans, as
+        // on Windows, so the next lookup of those pages needs no query at all.
+        struct MapRange {
+            std::uintptr_t first;
+            std::uintptr_t last;
+            bool readable;
+            bool writable;
+        };
+        thread_local std::vector<MapRange> ranges;
+        thread_local auto generationSeen = ~decltype(GuestAllocations::GuestAllocationsGeneration_nid_postfix()){};
+        thread_local std::chrono::steady_clock::time_point takenAt{};
+        const auto generation = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+        const auto now = std::chrono::steady_clock::now();
+        const auto find = [&]() -> const MapRange* {
+            const auto after = std::upper_bound(ranges.begin(), ranges.end(), cursor,
+                                                [](std::uintptr_t at, const MapRange& range) { return at < range.first; });
+            if (after == ranges.begin()) return nullptr;
+            const auto& candidate = *std::prev(after);
+            return cursor < candidate.last ? &candidate : nullptr;
+        };
+        const bool expired = generation != generationSeen || now - takenAt > std::chrono::milliseconds(50);
+        const MapRange* found = expired ? nullptr : find();
+        if (found == nullptr) {
+            std::ifstream maps("/proc/self/maps");
+            if (!maps.is_open()) return false;
+            ranges.clear();
+            std::string line;
+            while (std::getline(maps, line)) {
+                char* rest = nullptr;
+                const std::uintptr_t first = std::strtoull(line.c_str(), &rest, 16);
+                if (rest == nullptr || *rest != '-') continue;
+                const std::uintptr_t last = std::strtoull(rest + 1, &rest, 16);
+                if (rest == nullptr || *rest != ' ' || first >= last || line.size() < static_cast<std::size_t>(rest - line.c_str()) + 3) continue;
+                const bool canRead = rest[1] == 'r';
+                ranges.push_back(MapRange{first, last, canRead, canRead && rest[2] == 'w'});
+            }
+            generationSeen = generation;
+            takenAt = now;
+            found = find();
         }
-        if (!found) {
+        if (found == nullptr) {
             static_cast<void>(emit(PageRun{cursor, end, false, false}));
             return true;
         }
+        const auto next = std::min(end, found->last);
+        const bool readable = found->readable;
+        const bool writable = found->writable;
+        for (PageSpan* span : {&pages.arena, &pages.image}) {
+            if (!readable || span->size == 0 || next <= span->base || cursor >= span->base + span->size) continue;
+            const std::uint8_t value = PageReadable | (writable ? PageWritable : 0u);
+            const auto first = std::max(cursor, span->base) & ~static_cast<std::uintptr_t>(PageBytes - 1);
+            const auto last = std::min(next, span->base + span->size);
+            for (auto at = std::max(first, span->base); at < last; at += PageBytes) span->store(at, value);
+            if (GuestAllocations::GuestAllocationsGeneration_nid_postfix() != generation) span->forget(first, static_cast<std::size_t>(last - first));
+        }
+        if (!emit(PageRun{cursor, next, readable, writable})) return true;
+        cursor = next;
 #endif
     }
     return true;

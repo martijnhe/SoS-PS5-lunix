@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdarg>
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <set>
@@ -17,6 +18,7 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <link.h>
 #endif
 
 namespace {
@@ -93,8 +95,90 @@ void RunDeferredLifecycle(void* native) {
         return;
     }
 }
+#else
+
+// Same file as GuestModuleWriter::DeferredInitTag in the relinker.
+constexpr std::int64_t DeferredInitTag = 0x6a505335;
+
+// Start arguments of the sceKernelLoadStartModule call running on this thread (see Module.cpp).
+struct PendingModuleStart {
+    bool set = false;
+    std::uint64_t args = 0;
+    const void* argp = nullptr;
+    int result = 0;
+};
+thread_local PendingModuleStart pendingModuleStart;
+
+// The relinker's lifecycle stub is "xor edi,edi; xor esi,esi; xor edx,edx; jmp rel32". To pass the start
+// arguments, call the initializer it jumps to.
+std::uintptr_t LifecycleTarget(std::uintptr_t stub) {
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(stub);
+    constexpr std::uint8_t prefix[] = {0x31, 0xff, 0x31, 0xf6, 0x31, 0xd2, 0xe9};
+    if (std::memcmp(bytes, prefix, sizeof(prefix)) != 0) return stub;
+    std::int32_t displacement = 0;
+    std::memcpy(&displacement, bytes + sizeof(prefix), sizeof(displacement));
+    return stub + sizeof(prefix) + sizeof(displacement) + static_cast<std::intptr_t>(displacement);
+}
+
+// A deferred guest module is loaded with the program but initialized here, the first time the game
+// loads it, as RunDeferredLifecycle does on Windows. The relinker records its initializer under DeferredInitTag.
+// Unity plugins such as PSN.prx read the arguments of sceKernelLoadStartModule, as upstream AnyPS5 passes them.
+void RunDeferredLifecycle(void* native) {
+    static std::mutex lifecycleMutex;
+    static std::set<void*> started;
+    {
+        std::lock_guard lock(lifecycleMutex);
+        if (!started.insert(native).second) return;
+    }
+    link_map* map = nullptr;
+    if (dlinfo(native, RTLD_DI_LINKMAP, &map) != 0 || map == nullptr || map->l_ld == nullptr) return;
+    for (const auto* entry = map->l_ld; entry->d_tag != DT_NULL; ++entry) {
+        if (entry->d_tag != DeferredInitTag) continue;
+        const auto stub = map->l_addr + entry->d_un.d_ptr;
+        auto& pending = pendingModuleStart;
+        if (pending.set) {
+            const auto init = LifecycleTarget(stub);
+            Log("running deferred module start at %p (%s) args=%llu argp=%p", reinterpret_cast<void*>(init), map->l_name,
+                static_cast<unsigned long long>(pending.args), pending.argp);
+            pending.result = reinterpret_cast<int (*)(std::uint64_t, const void*, std::uint64_t)>(init)(pending.args, pending.argp, 0);
+        } else {
+            Log("running deferred module init at %p (%s)", reinterpret_cast<void*>(stub), map->l_name);
+            reinterpret_cast<void (*)(std::uint64_t, std::uint64_t, std::uint64_t)>(stub)(0, 0, 0);
+        }
+        return;
+    }
+}
+
+// The game asks for its own modules by their PS5 names; the relinker wrote them as <name>.guest.prx.
+std::filesystem::path GuestModulePath(const std::filesystem::path& resolved) {
+    std::error_code error;
+    const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
+    if (error) return {};
+    // Matched without regard to case: the console's file system ignores it, as Windows does, and titles rely on
+    // that (God of War Sons of Sparta loads Il2CppUserAssemblies.prx; the file is Il2cppUserAssemblies.prx).
+    const auto lower = [](std::string text) {
+        for (auto& character : text) character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+        return text;
+    };
+    const auto wanted = lower(resolved.filename().string() + ".guest.prx");
+    for (const char* directory : {"app0/sce_module", "sce_module"}) {
+        for (const auto& entry : std::filesystem::directory_iterator(executable.parent_path() / directory, error))
+            if (lower(entry.path().filename().string()) == wanted) return entry.path();
+    }
+    return {};
+}
 #endif
 }
+
+#ifndef _WIN32
+// Used by sceKernelLoadStartModule around its dlopen.
+extern "C" void BeginModuleStart(std::uint64_t args, const void* argp) { pendingModuleStart = {true, args, argp, 0}; }
+extern "C" int EndModuleStart() {
+    const int result = pendingModuleStart.result;
+    pendingModuleStart = {};
+    return result;
+}
+#endif
 
 extern "C" {
 char* APS5_VABI dlerror_nid_postfix() {
@@ -141,7 +225,10 @@ void* APS5_VABI dlopen_nid_postfix_impl(const char* path, int flags) {
             Error(message); return nullptr;
         }
 #else
-        const auto resolved = path ? ResolvePath_nid_no_patch(path).string() : std::string{};
+        auto resolved = path ? ResolvePath_nid_no_patch(path).string() : std::string{};
+        if (path && *path) {
+            if (const auto guest = GuestModulePath(resolved); !guest.empty()) resolved = guest.string();
+        }
         const int nativeFlags = ((flags & 3) == 1 ? RTLD_LAZY : RTLD_NOW) |
             ((flags & 0x100) ? RTLD_GLOBAL : RTLD_LOCAL);
         module->native = ::dlopen(path ? resolved.c_str() : nullptr, nativeFlags);
@@ -154,10 +241,7 @@ void* APS5_VABI dlopen_nid_postfix_impl(const char* path, int flags) {
             handle = nextHandle++;
             modules.emplace(handle, std::move(module));
         }
-#ifdef _WIN32
-
         RunDeferredLifecycle(native);
-#endif
         return reinterpret_cast<void*>(handle);
     } catch (const std::exception& error) { Error(error.what()); return nullptr; }
 }
@@ -165,7 +249,7 @@ void* APS5_VABI dlsym_nid_postfix_impl(void* handle, const char* name);
 void* APS5_VABI dlsym_nid_postfix(void* handle, const char* name) {
     void* result = dlsym_nid_postfix_impl(handle, name);
     static int count = 0;
-    if (TraceLoader() && (!result || count++ < 40)) Log("dlsym(%p, %s) -> %p", handle, name ? name : "(null)", result);
+    if (TraceLoader() && (!result || count++ < 4000)) Log("dlsym(%p, %s) -> %p", handle, name ? name : "(null)", result);
     return result;
 }
 void* APS5_VABI dlsym_nid_postfix_impl(void* handle, const char* name) {

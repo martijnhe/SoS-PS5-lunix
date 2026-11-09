@@ -16,6 +16,7 @@
 #include "SDL.h"
 #include "SDL_vulkan.h"
 #include "prx/libSceVideoOut/include/PadInput.hpp"
+#include "prx/libSceVideoOut/include/QuickSettings.hpp"
 #include "prx/libSceVideoOut/include/MouseInput.hpp"
 #include "prx/libSceVideoOut/include/KeyboardInput.hpp"
 #include "prx/libScePad/include/PadState.hpp"
@@ -524,6 +525,11 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
             }
             window.UpdateCursor(overlay.IsOpen());
             padInput.Update();
+            if (padInput.ConsumeMenuCombo()) {
+                overlay.ToggleMenu();
+                syncMenuInput();
+            }
+            overlay.SetPadButtons(padInput.MenuButtons());
             if (current) {
                 require(current->timing != nullptr, "missing presentation timing");
                 const auto dequeued = AgcDriver::FrameTiming::Clock::now();
@@ -532,9 +538,9 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
                 processFlip(*current);
                 syncMenuInput();
                 {
-                    static const std::chrono::steady_clock::duration capInterval = [] {
-                        const char* text = std::getenv("APS5_FPS_CAP");
-                        const double cap = text ? std::atof(text) : 0.0;
+                    // Read every frame: the in-game menu can change the limit (APS5_FPS_CAP is its starting value).
+                    const std::chrono::steady_clock::duration capInterval = [] {
+                        const double cap = QuickSettings::Get().fpsCap.load();
                         if (cap < 30.0 || cap > 1000.0) return std::chrono::steady_clock::duration::zero();
                         return std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(1.0 / cap));
                     }();
@@ -553,6 +559,8 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
                                 relative.QuadPart = -std::chrono::duration_cast<std::chrono::nanoseconds>(early).count() / 100;
                                 if (SetWaitableTimer(timer, &relative, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, INFINITE);
                             }
+#else
+                            std::this_thread::sleep_for(early);  // not a spin: this runs on battery on a Steam Deck
 #endif
                         }
                         while (std::chrono::steady_clock::now() < due) std::this_thread::yield();

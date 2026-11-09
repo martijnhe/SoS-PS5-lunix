@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "prx/libSceVideoOut/include/QuickSettings.hpp"
 #include <stdexcept>
 #include <string>
 
@@ -17,8 +18,14 @@
 
 namespace {
 
-PadControllerKind ClassifyController(SDL_GameControllerType type) {
+PadControllerKind ClassifyController(SDL_GameControllerType type, const char* name) {
+    // The Steam Deck's own controls: its face buttons are laid out and labelled as on an Xbox pad.
+    if (name != nullptr && std::strstr(name, "Steam Deck") != nullptr) return PadControllerKind::Xbox;
     switch (type) {
+        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return PadControllerKind::Nintendo;
         case SDL_CONTROLLER_TYPE_PS5: return PadControllerKind::PlayStation5;
         case SDL_CONTROLLER_TYPE_PS4: return PadControllerKind::PlayStation4;
         case SDL_CONTROLLER_TYPE_XBOX360:
@@ -58,6 +65,8 @@ void PadInput::openFirstAvailableController() {
     if (controller != nullptr) return;
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
+    // Nintendo pads by the letter printed on the button, so the A button confirms as on a Switch.
+    SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "1");
     if ((SDL_WasInit(SDL_INIT_GAMECONTROLLER) & SDL_INIT_GAMECONTROLLER) == 0) {
         if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
             APS5_LOG_ERR("Pad: SDL game controller init failed: %s", SDL_GetError());
@@ -289,7 +298,7 @@ PadInputState PadInput::sampleController() const {
         stickValue(SDL_CONTROLLER_AXIS_RIGHTX),
         stickValue(SDL_CONTROLLER_AXIS_RIGHTY)
     };
-    result.deviceKind = ClassifyController(SDL_GameControllerGetType(controller));
+    result.deviceKind = ClassifyController(SDL_GameControllerGetType(controller), SDL_GameControllerName(controller));
     if (SDL_GameControllerIsSensorEnabled(controller, SDL_SENSOR_ACCEL) == SDL_TRUE && SDL_GameControllerIsSensorEnabled(controller, SDL_SENSOR_GYRO) == SDL_TRUE) {
         float accel[3];
         float gyro[3];
@@ -386,6 +395,18 @@ void PadInput::Update() {
     applyOutput();
     const auto now = std::chrono::steady_clock::now();
     if (!script.empty()) applyScript(now);
+    {
+        const auto held = controllerState.buttons | scriptButtons;
+        const auto combo = static_cast<std::uint32_t>(Pad::PadButton::L3) | static_cast<std::uint32_t>(Pad::PadButton::R3);
+        if ((held & combo) != combo) {
+            comboHeld = comboLatched = false;
+        } else if (!comboHeld) {
+            comboHeld = true;
+            comboSince = now;
+        } else if (!comboLatched && now - comboSince >= std::chrono::milliseconds(250)) {
+            comboLatched = comboPressed = true;
+        }
+    }
     if (controller != nullptr || scriptActive) {
         if (controller != nullptr) controllerState = sampleController();
         publish();
@@ -419,6 +440,22 @@ void PadInput::Update() {
         mouseStick = {mapAxis(deltaX), mapAxis(deltaY)};
     }
     publish();
+}
+
+bool PadInput::ConsumeMenuCombo() {
+    const bool pressed = comboPressed;
+    comboPressed = false;
+    return pressed;
+}
+
+std::uint32_t PadInput::MenuButtons() const {
+    std::uint32_t buttons = controllerState.buttons | scriptButtons;
+    if (controller == nullptr) return buttons;  // no stick to read: its values mean nothing
+    if (controllerState.sticks[0] < 64) buttons |= static_cast<std::uint32_t>(Pad::PadButton::Left);
+    if (controllerState.sticks[0] > 192) buttons |= static_cast<std::uint32_t>(Pad::PadButton::Right);
+    if (controllerState.sticks[1] < 64) buttons |= static_cast<std::uint32_t>(Pad::PadButton::Up);
+    if (controllerState.sticks[1] > 192) buttons |= static_cast<std::uint32_t>(Pad::PadButton::Down);
+    return buttons;
 }
 
 void PadInput::publish() {
@@ -485,6 +522,24 @@ void PadInput::publish() {
     if (scriptStick) {
         state.sticks[0] = scriptStickAxes[0];
         state.sticks[1] = scriptStickAxes[1];
+    }
+    {
+        const auto& quick = QuickSettings::Get();
+        const auto swap = [&state](Pad::PadButton a, Pad::PadButton b) {
+            const auto first = static_cast<std::uint32_t>(a), second = static_cast<std::uint32_t>(b);
+            const bool hasFirst = (state.buttons & first) != 0, hasSecond = (state.buttons & second) != 0;
+            state.buttons &= ~(first | second);
+            if (hasFirst) state.buttons |= second;
+            if (hasSecond) state.buttons |= first;
+        };
+        if (quick.swapConfirm) swap(Pad::PadButton::Cross, Pad::PadButton::Circle);
+        if (quick.swapShoulders) {
+            swap(Pad::PadButton::L1, Pad::PadButton::L2);
+            swap(Pad::PadButton::R1, Pad::PadButton::R2);
+            state.analogButtonsL2 = (state.buttons & static_cast<std::uint32_t>(Pad::PadButton::L2)) != 0 ? 255 : 0;
+            state.analogButtonsR2 = (state.buttons & static_cast<std::uint32_t>(Pad::PadButton::R2)) != 0 ? 255 : 0;
+        }
+        if (quick.invertLook) state.sticks[3] = static_cast<std::uint8_t>(255 - state.sticks[3]);
     }
     if (gameInputBlocked) {
         const auto deviceKind = state.deviceKind;

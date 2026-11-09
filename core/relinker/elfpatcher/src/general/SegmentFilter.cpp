@@ -12,6 +12,9 @@ bool SegmentFilter::_isSceSpecificSegment(const std::uint32_t type) const {
 
 bool SegmentFilter::ShouldSkip(const Domain::ProgramHeader& ph) const {
     if (ph.Type == PT_OS_PROCPARAM) return false;
+    // Unwind tables: without this header the unwinder finds no frames in the executable, so a C++ (or IL2CPP
+    // managed) exception thrown through it is never caught. Kept as upstream AnyPS5 keeps it.
+    if (ph.Type == PT_GNU_EH_FRAME || ph.Type == PT_GNU_STACK) return false;
     if (_isSceSpecificSegment(ph.Type)) return true;
     if (ph.Type == PT_DYNAMIC) return true;
     if (ph.Type == PT_NOTE && ph.MappedAddress == 0 && ph.FileSize > 0) return true;

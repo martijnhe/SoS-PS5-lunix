@@ -2,7 +2,6 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
-#ifdef _WIN32
 #include <atomic>
 #include "prx/common/BlowInput.hpp"
 
@@ -25,7 +24,6 @@ int WriteBlowSamples(void* dest) {
  return static_cast<int>(samples);
 }
 }
-#endif
 
 extern "C" {
 
@@ -38,12 +36,10 @@ int APS5_VABI sceAudioInGetSilentState(int handle) {
 int APS5_VABI sceAudioInInput(int handle, void* dest) {
  (void)handle;
  (void)dest;
-#ifdef _WIN32
  if (BlowInput::IsActive()) {
   const int samples = WriteBlowSamples(dest);
   if (samples > 0) return samples;
  }
-#endif
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
@@ -55,18 +51,14 @@ int APS5_VABI sceAudioInOpen(int user_id, uint32_t type, uint32_t index, uint32_
  (void)len;
  (void)freq;
  (void)param;
-#ifdef _WIN32
  RememberFormat(len, param);
-#endif
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
 int32_t APS5_VABI sceAudioInClose(int32_t handle) {
  (void)handle;
-#ifdef _WIN32
  openSamples.store(0);
-#endif
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
@@ -78,9 +70,7 @@ int32_t APS5_VABI sceAudioInHqOpen(int32_t user_id, uint32_t type, uint32_t inde
  (void)len;
  (void)freq;
  (void)param;
-#ifdef _WIN32
  RememberFormat(len, param);
-#endif
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }

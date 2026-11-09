@@ -1,3 +1,23 @@
+#include <cerrno>
+#ifndef _WIN32
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/fs.h>
+#ifndef PROCMAP_QUERY
+// Older kernel headers do not declare this interface (Linux 6.11+); the running kernel decides at runtime.
+#include <linux/types.h>
+struct procmap_query {
+    __u64 size, query_flags, query_addr, vma_start, vma_end, vma_flags, vma_page_size, vma_offset, inode;
+    __u32 dev_major, dev_minor, vma_name_size, build_id_size;
+    __u64 vma_name_addr, build_id_addr;
+};
+#define PROCMAP_QUERY _IOWR('f', 17, struct procmap_query)
+#define PROCMAP_QUERY_VMA_READABLE 0x01
+#define PROCMAP_QUERY_VMA_WRITABLE 0x02
+#define PROCMAP_QUERY_COVERING_OR_NEXT_VMA 0x10
+#endif
+#endif
 #include "prx/common/StderrLog.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
@@ -422,6 +442,13 @@ void ForgetPages(std::uintptr_t address, std::size_t bytes) {
 void PageStates::initialize() {
     std::call_once(once, [&] {
         GuestArena::GuestArenaRange_nid_postfix(&arena.base, &arena.size);
+#ifndef _WIN32
+        // libc's GuestArena span is Windows-only, so give the Linux low window a span to cache into.
+        if (arena.size == 0) {
+            arena.base = 0x200000000;
+            arena.size = 0x400000000;
+        }
+#endif
         const bool arenaCached = arena.allocate();
         bool imageCached = false;
 #ifdef _WIN32
@@ -450,6 +477,42 @@ struct PageRun {
     bool readable;
     bool writable;
 };
+
+#ifndef _WIN32
+struct ProcHit {
+    bool covering = false;
+    bool readable = false;
+    bool writable = false;
+    std::uintptr_t end = 0;
+};
+
+// One PROCMAP_QUERY ioctl: a kernel VMA lookup instead of parsing all of /proc/self/maps as text,
+// whose cost grows with the mapping count. False means the ioctl is unavailable: use the text parse.
+bool QueryProcMap(std::uintptr_t cursor, ProcHit& out) {
+    static const int mapsFd = ::open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+    static const bool supported = [] {
+        if (mapsFd < 0) return false;
+        procmap_query request{};
+        request.size = sizeof request;
+        request.query_addr = static_cast<__u64>(reinterpret_cast<std::uintptr_t>(&QueryProcMap));
+        request.query_flags = PROCMAP_QUERY_COVERING_OR_NEXT_VMA;
+        return ::ioctl(mapsFd, PROCMAP_QUERY, &request) == 0 || errno == ENOENT;
+    }();
+    if (!supported) return false;
+    procmap_query request{};
+    request.size = sizeof request;
+    request.query_addr = static_cast<__u64>(cursor);
+    request.query_flags = PROCMAP_QUERY_COVERING_OR_NEXT_VMA;
+    if (::ioctl(mapsFd, PROCMAP_QUERY, &request) != 0) return errno == ENOENT;
+    out.covering = request.vma_start <= cursor && cursor < request.vma_end;
+    if (out.covering) {
+        out.readable = (request.vma_flags & PROCMAP_QUERY_VMA_READABLE) != 0;
+        out.writable = (request.vma_flags & PROCMAP_QUERY_VMA_WRITABLE) != 0;
+        out.end = static_cast<std::uintptr_t>(request.vma_end);
+    }
+    return true;
+}
+#endif
 
 template <class Emit>
 bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
@@ -504,6 +567,28 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
         if (!emit(PageRun{cursor, next, readable, writable})) return true;
         cursor = next;
 #else
+        ProcHit hit;
+        if (QueryProcMap(cursor, hit)) {
+            if (!hit.covering) {
+                static_cast<void>(emit(PageRun{cursor, end, false, false}));
+                return true;
+            }
+            const auto next = std::min(end, hit.end);
+            if (hit.readable) {
+                const auto generation = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+                for (PageSpan* span : {&pages.arena, &pages.image}) {
+                    if (span->size == 0 || next <= span->base || cursor >= span->base + span->size) continue;
+                    const std::uint8_t value = PageReadable | (hit.writable ? PageWritable : 0u);
+                    const auto first = std::max(cursor, span->base) & ~static_cast<std::uintptr_t>(PageBytes - 1);
+                    const auto last = std::min(next, span->base + span->size);
+                    for (auto at = std::max(first, span->base); at < last; at += PageBytes) span->store(at, value);
+                    if (GuestAllocations::GuestAllocationsGeneration_nid_postfix() != generation) span->forget(first, static_cast<std::size_t>(last - first));
+                }
+            }
+            if (!emit(PageRun{cursor, next, hit.readable, hit.writable})) return true;
+            cursor = next;
+            continue;
+        }
         // /proc/self/maps is far too slow to read per lookup: one parsed snapshot per thread, replaced
         // when guest allocations change or it is 50 ms old. What is found goes into the page spans, as
         // on Windows, so the next lookup of those pages needs no query at all.

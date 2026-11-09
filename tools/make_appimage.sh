@@ -23,6 +23,8 @@ Exec=AppRun
 Icon=sons-of-sparta
 Categories=Game;
 D
+    chmod -R a+rX "$dir"  # mktemp makes it private; appimagetool refuses that
+    chmod a+rx "$dir/AppRun"
     "$tool" --no-appstream "$dir" "$out/SonsOfSparta-PS5-$2-$version-x86_64.AppImage"
     rm -rf "$dir"
 }
